@@ -1,39 +1,38 @@
 require 'SVG/Graph/TimeSeries'
 
 class GraphsController < ApplicationController
-
     unloadable
 
     ############################################################################
     # Initialization
     ############################################################################
     
-    menu_item :issues, :only => [:issue_growth, :old_issues]
+    menu_item :issues, :only => [:issue_growth, :old_issues, :bug_growth]
 
     before_filter :find_version, :only => [:target_version_graph]
     before_filter :confirm_issues_exist, :only => [:issue_growth]
     before_filter :find_optional_project, :only => [:issue_growth_graph]
     before_filter :find_open_issues, :only => [:old_issues, :issue_age_graph]
-    
+    before_filter :find_bug_issues, :only => [:issue_growth, :bug_growth, :bug_growth_graph]
+	
     helper IssuesHelper
-
     
     ############################################################################
     # My Page block graphs
     ############################################################################
-    
     # Displays a ring of issue assignement changes around the current user
     def recent_assigned_to_changes_graph
+        yesterday = (Time.now - 7.day).strftime('%Y-%m-%d %H:%M:%S')
         # Get the top visible projects by issue count
         sql = " select u1.id as old_user, u2.id as new_user, count(*) as changes_count"
         sql << " from journals as j"
         sql << " left join journal_details as jd on j.id = jd.journal_id"
-        sql << " left join users as u1 on jd.old_value = u1.id"
-        sql << " left join users as u2 on jd.value = u2.id"
-        sql << " where journalized_type = 'issue' and prop_key = 'assigned_to_id' and  DATE_SUB(CURRENT_TIMESTAMP, INTERVAL 1 DAY) <= j.created_on"
+        sql << " left join users as u1 on cast(jd.old_value AS decimal) = u1.id"
+        sql << " left join users as u2 on cast(jd.value AS decimal) = u2.id"
+        sql << " where journalized_type = 'issue' and prop_key = 'assigned_to_id' and timestamp '#{yesterday}' <= j.created_on"
         sql << " and (u1.id = #{User.current.id} or u2.id = #{User.current.id})"
         sql << " and u1.id <> 0 and u2.id <> 0"
-        sql << " group by old_value, value"
+        sql << " group by old_user, new_user"
         @assigned_to_changes = ActiveRecord::Base.connection.select_all(sql)
         user_ids = @assigned_to_changes.collect { |change| [change["old_user"].to_i, change["new_user"].to_i] }.flatten.uniq
         user_ids.delete(User.current.id)
@@ -44,14 +43,15 @@ class GraphsController < ApplicationController
     
     # Displays a ring of issue status changes
     def recent_status_changes_graph
+        yesterday = (Time.now - 7.day).strftime('%Y-%m-%d %H:%M:%S')
         # Get the top visible projects by issue count
         sql = " select is1.id as old_status, is2.id as new_status, count(*) as changes_count"
         sql << " from journals as j"
         sql << " left join journal_details as jd on j.id = jd.journal_id"
-        sql << " left join issue_statuses as is1 on jd.old_value = is1.id"
-        sql << " left join issue_statuses as is2 on jd.value = is2.id"
-        sql << " where journalized_type = 'issue' and prop_key = 'status_id' and  DATE_SUB(CURRENT_TIMESTAMP, INTERVAL 1 DAY) <= created_on"
-        sql << " group by old_value, value"
+        sql << " left join issue_statuses as is1 on cast(jd.old_value AS decimal) = is1.id"
+        sql << " left join issue_statuses as is2 on cast(jd.value AS decimal) = is2.id"
+        sql << " where journalized_type = 'issue' and prop_key = 'status_id' and  timestamp '#{yesterday}' <= created_on"
+        sql << " group by old_status, new_status"
         sql << " order by is1.position, is2.position"
         @status_changes = ActiveRecord::Base.connection.select_all(sql)
         @issue_statuses = IssueStatus.find(:all).sort { |a,b| a.position<=>b.position }
@@ -63,7 +63,6 @@ class GraphsController < ApplicationController
     ############################################################################
     # Graph pages
     ############################################################################
-    
     # Displays total number of issues over time
     def issue_growth
     end
@@ -73,35 +72,39 @@ class GraphsController < ApplicationController
         @issues_by_created_on = @issues.sort {|a,b| a.created_on<=>b.created_on} 
         @issues_by_updated_on = @issues.sort {|a,b| a.updated_on<=>b.updated_on}
     end
-    
+    # Displays created vs update date on bugs over time    
+    def bug_growth
+        @bug_by_created = @bugs.group_by {|issue| issue.created_on.to_date }.sort
+    end
         
     ############################################################################
     # Embedded graphs for graph pages
     ############################################################################
-    
     # Displays projects by total issues over time
     def issue_growth_graph
-    
-        # Initialize the graph
-        graph = SVG::Graph::TimeSeries.new({
-            :area_fill => true,
-            :height => 300,
-            :min_y_value => 0,
-            :no_css => true,
-            :show_x_guidelines => true,
-            :scale_x_integers => true,
-            :scale_y_integers => true,
-            :show_data_points => false,
-            :show_data_values => false,
-            :stagger_x_labels => true,
-            :style_sheet => "/plugin_assets/redmine-graphs-plugin/stylesheets/issue_growth.css",
-            :width => 720,
-            :x_label_format => "%Y-%m-%d"
-        })
-        
+      top_projects = nil; issue_counts = nil;
+      
+      # Initialize the graph
+      graph = SVG::Graph::TimeSeries.new({
+          :area_fill => true,
+          :height => 300,
+          :min_y_value => 0,
+          :no_css => true,
+          :show_x_guidelines => true,
+          :scale_x_integers => true,
+          :scale_y_integers => true,
+          :show_data_points => false,
+          :show_data_values => false,
+          :stagger_x_labels => true,
+          :style_sheet => "/plugin_assets/redmine_graphs/stylesheets/issue_growth.css",
+          :width => 720,
+          :x_label_format => "%Y-%m-%d"
+      })
+
+      ActiveRecord::Base.connection_pool.with_connection do |conn|
         # Get the top visible projects by issue count
         sql = "SELECT project_id, COUNT(*) as issue_count"
-        sql << " FROM issues"
+        sql << " FROM #{Issue.table_name}"
         sql << " LEFT JOIN #{Project.table_name} ON #{Issue.table_name}.project_id = #{Project.table_name}.id"
         sql << " WHERE (%s)" % Project.allowed_to_condition(User.current, :view_issues)
         unless @project.nil?
@@ -109,37 +112,50 @@ class GraphsController < ApplicationController
             sql << "    OR project_id IN (%s)" % @project.descendants.active.visible.collect { |p| p.id }.join(',') unless @project.descendants.active.visible.empty?
             sql << " )"
         end 
+        unless User.current.admin?
+            sql << " AND (#{Issue.table_name}.is_private = #{conn.quoted_false} OR "
+            sql << "(#{Project.allowed_to_condition(User.current, :view_private_issues)}))"
+        end
         sql << " GROUP BY project_id"
         sql << " ORDER BY issue_count DESC"
         sql << " LIMIT 6"
-        top_projects = ActiveRecord::Base.connection.select_all(sql).collect { |p| p["project_id"] }
+        top_projects = conn.select_all(sql).collect { |p| p["project_id"] }
         
         # Get the issues created per project, per day
         sql = "SELECT project_id, date(#{Issue.table_name}.created_on) as date, COUNT(*) as issue_count"
         sql << " FROM #{Issue.table_name}"
+        sql << " LEFT JOIN #{Project.table_name} ON #{Issue.table_name}.project_id = #{Project.table_name}.id"
         sql << " WHERE project_id IN (%s)" % top_projects.compact.join(',')
-        sql << " GROUP BY project_id, date"
-        issue_counts = ActiveRecord::Base.connection.select_all(sql).group_by { |c| c["project_id"] }
-
-        # Generate the created_on lines
-        top_projects.each do |project_id, total_count|
-            counts = issue_counts[project_id].sort { |a,b| a["date"]<=>b["date"] }         
-            created_count = 0
-            created_on_line = Hash.new
-            created_on_line[(Date.parse(counts.first["date"].to_s)-1).to_s] = 0
-            counts.each { |count| created_count += count["issue_count"].to_i; created_on_line[count["date"].to_s] = created_count }
-            created_on_line[Date.today.to_s] = created_count
-            graph.add_data({
-                :data => created_on_line.sort.flatten,
-                :title => Project.find(project_id).to_s
-            })
+        unless User.current.admin?
+            sql << " AND (#{Issue.table_name}.is_private = #{conn.quoted_false} OR "
+            sql << "(#{Project.allowed_to_condition(User.current, :view_private_issues)}))"
         end
-        
-        # Compile the graph
-        headers["Content-Type"] = "image/svg+xml"
-        send_data(graph.burn, :type => "image/svg+xml", :disposition => "inline")
+        sql << " GROUP BY project_id, date"
+        issue_counts = conn.select_all(sql).group_by { |c| c["project_id"] } unless top_projects.compact.empty?
+      end
+      
+      # Generate the created_on lines
+      top_projects.each do |project_id|
+          counts = Array(issue_counts[project_id])
+          created_count = 0
+          created_on_line = Hash.new
+          created_on_line[(Date.parse( Array(counts).first["date"].to_s )-1).to_s] = 0
+          counts.each { |count| created_count += count["issue_count"].to_i; created_on_line[count["date"].to_s] = created_count }
+          created_on_line[Date.today.to_s] = created_count
+          graph.add_data({
+              :data =>  Array(created_on_line).sort.flatten,
+              :title => Project.find(project_id).to_s
+          })
+      end
+      graph.add_data(
+        :data => [ Date.today.to_s, 0 , (Date.today + 60).to_s, 0 ], 
+        :title => Project.find(@project.id).to_s
+      ) if top_projects.compact.empty?
+      
+      # Compile the graph
+      headers["Content-Type"] = "image/svg+xml"
+      send_data(graph.burn, :type => "image/svg+xml", :disposition => "inline")
     end
-
 
     # Displays issues by creation date, cumulatively
     def issue_age_graph
@@ -156,7 +172,7 @@ class GraphsController < ApplicationController
             :show_data_points => false,
             :show_data_values => false,
             :stagger_x_labels => true,
-            :style_sheet => "/plugin_assets/redmine-graphs-plugin/stylesheets/issue_age.css",
+            :style_sheet => "/plugin_assets/redmine_graphs/stylesheets/issue_age.css",
             :width => 720,
             :x_label_format => "%b %d"
         })
@@ -190,7 +206,56 @@ class GraphsController < ApplicationController
         send_data(graph.burn, :type => "image/svg+xml", :disposition => "inline")
     end
     
-    # Displays open and total issue counts over time
+	# Displays bugs over time
+    def bug_growth_graph
+    
+        # Initialize the graph
+        graph = SVG::Graph::TimeSeries.new({
+            :area_fill => true,
+            :height => 300,
+            :min_y_value => 0,
+            :no_css => true,
+            :show_x_guidelines => true,
+            :scale_x_integers => true,
+            :scale_y_integers => true,
+            :show_data_points => false,
+            :show_data_values => false,
+            :stagger_x_labels => true,
+            :style_sheet => "/plugin_assets/redmine_graphs/stylesheets/bug_growth.css",
+            :width => 720,
+            :x_label_format => "%Y-%m-%d"
+        })
+
+        # Group issues
+        bug_by_created_on = @bugs.group_by {|issue| issue.created_on.to_date }.sort
+        bug_by_updated_on = @bugs.delete_if {|issue| !issue.closed? }.group_by {|issue| issue.updated_on.to_date }.sort
+		
+        # Generate the created_on line
+        created_count = 0
+        created_on_line = Hash.new
+        bug_by_created_on.each { |created_on, bugs| created_on_line[(created_on-1).to_s] = created_count; created_count += bugs.size; created_on_line[created_on.to_s] = created_count }
+        created_on_line[Date.today.to_s] = created_count
+        graph.add_data({
+            :data => created_on_line.sort.flatten,
+            :title => l(:field_created_on)
+        }) unless bug_by_created_on.empty?
+        
+        # Generate the closed_on line
+        updated_count = 0
+        updated_on_line = Hash.new
+        bug_by_updated_on.each { |updated_on, bugs| updated_on_line[(updated_on-1).to_s] = updated_count; updated_count += bugs.size; updated_on_line[updated_on.to_s] = updated_count }
+        updated_on_line[Date.today.to_s] = updated_count
+        graph.add_data({
+            :data => updated_on_line.sort.flatten,
+            :title => l(:label_graphs_closed_bugs)
+        }) unless bug_by_updated_on.empty?
+        
+        # Compile the graph
+        headers["Content-Type"] = "image/svg+xml"
+        send_data(graph.burn, :type => "image/svg+xml", :disposition => "inline")
+    end
+	
+	# Displays open and total issue counts over time
     def target_version_graph
 
         # Initialize the graph
@@ -204,11 +269,10 @@ class GraphsController < ApplicationController
             :show_data_points => true,
             :show_data_values => false,
             :stagger_x_labels => true,
-            :style_sheet => "/plugin_assets/redmine-graphs-plugin/stylesheets/target_version.css",
+            :style_sheet => "/plugin_assets/redmine_graphs/stylesheets/target_version.css",
             :width => 800,
             :x_label_format => "%b %d"
         })
-
 
         # Group issues
         issues_by_created_on = @version.fixed_issues.group_by {|issue| issue.created_on.to_date }.sort
@@ -285,7 +349,20 @@ class GraphsController < ApplicationController
     rescue ActiveRecord::RecordNotFound
         render_404
     end
-        
+	
+	def find_bug_issues
+        find_optional_project
+        if !@project.nil?
+            ids = [@project.id]
+            ids += @project.descendants.active.visible.collect(&:id)
+            @bugs= Issue.visible.find(:all, :include => [:status], :conditions => ["#{Issue.table_name}.tracker_id IN (?) AND #{Project.table_name}.id IN (?)", 1, ids])
+        else
+            @bugs= Issue.visible.find(:all, :include => [:status], :conditions => ["#{Issue.table_name}.tracker_id IN (?)", 1])
+        end
+    rescue ActiveRecord::RecordNotFound
+        render_404
+    end
+	        
     def find_optional_project
         @project = Project.find(params[:project_id]) unless params[:project_id].blank?
         deny_access unless User.current.allowed_to?(:view_issues, @project, :global => true)
