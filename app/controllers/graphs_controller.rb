@@ -36,7 +36,7 @@ class GraphsController < ApplicationController
         @assigned_to_changes = ActiveRecord::Base.connection.select_all(sql)
         user_ids = @assigned_to_changes.collect { |change| [change["old_user"].to_i, change["new_user"].to_i] }.flatten.uniq
         user_ids.delete(User.current.id)
-        @users = User.find(:all, :conditions => "id IN ("+user_ids.join(',')+")").index_by { |user| user.id } unless user_ids.empty?
+        @users = User.where(id: user_ids).to_a.index_by { |user| user.id } unless user_ids.empty?
         headers["Content-Type"] = "image/svg+xml"
         render :layout => false
     end
